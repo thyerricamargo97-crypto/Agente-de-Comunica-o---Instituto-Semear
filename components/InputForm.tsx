@@ -1,0 +1,335 @@
+import React, { useEffect } from 'react';
+import { CampaignInput, SequenceStep, Attachment } from '../types';
+import { Card } from './ui/Card';
+import { Input, Textarea, Select } from './ui/FormControls';
+import { Button } from './ui/Button';
+import { TONES, CHANNELS } from '../constants';
+import * as XLSX from 'xlsx';
+
+interface InputFormProps {
+    campaignInput: CampaignInput;
+    setCampaignInput: (input: CampaignInput) => void;
+    onGenerate: () => void;
+    isLoading: boolean;
+}
+
+export const InputForm: React.FC<InputFormProps> = ({ campaignInput, setCampaignInput, onGenerate, isLoading }) => {
+    
+    useEffect(() => {
+        const needsUpdate = campaignInput.sequence.some((step, index) => {
+            const channelCode = step.channel === 'E-mail' ? 'E' : 'W';
+            const expectedId = `${campaignInput.campaignId}-${channelCode}-${String(index + 1).padStart(2, '0')}`;
+            return step.communicationId !== expectedId;
+        });
+
+        if (needsUpdate || campaignInput.campaignId) {
+            const newSequence = campaignInput.sequence.map((step, index) => {
+                const channelCode = step.channel === 'E-mail' ? 'E' : 'W';
+                const newId = `${campaignInput.campaignId}-${channelCode}-${String(index + 1).padStart(2, '0')}`;
+                if (step.communicationId !== newId) {
+                    return { ...step, communicationId: newId };
+                }
+                return step;
+            });
+            // Only update if there is a real change to avoid loops
+            if (JSON.stringify(newSequence) !== JSON.stringify(campaignInput.sequence)) {
+                 setCampaignInput({ ...campaignInput, sequence: newSequence });
+            }
+        }
+    }, [campaignInput.campaignId, campaignInput.sequence, setCampaignInput]);
+
+
+    const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => {
+        const { name, value } = e.target;
+        setCampaignInput({ ...campaignInput, [name]: value });
+    };
+
+    const fileToBase64 = (file: File): Promise<string> => {
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.readAsDataURL(file);
+            reader.onload = () => {
+                const result = (reader.result as string).split(',')[1];
+                resolve(result);
+            };
+            reader.onerror = error => reject(error);
+        });
+    };
+
+    const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>, fieldName: 'emailBanner' | 'referenceModel' | 'mediaAttachments') => {
+        const target = e.target as HTMLInputElement;
+        const files = target.files;
+        if (!files || files.length === 0) return;
+
+        if (fieldName === 'mediaAttachments') {
+            const newAttachments: Attachment[] = [...campaignInput.mediaAttachments];
+            for (const file of Array.from(files)) {
+                const base64 = await fileToBase64(file);
+                let content: string | undefined;
+                if (file.type === 'text/plain') {
+                    content = await file.text();
+                }
+                newAttachments.push({ name: file.name, mimeType: file.type, data: base64, content });
+            }
+            setCampaignInput({ ...campaignInput, mediaAttachments: newAttachments });
+        } else {
+            const file = files[0];
+            const base64 = await fileToBase64(file);
+             let content: string | undefined;
+            if (file.type === 'text/plain') {
+                content = await file.text();
+            }
+            const attachment: Attachment = { name: file.name, mimeType: file.type, data: base64, content };
+            setCampaignInput({ ...campaignInput, [fieldName]: attachment });
+        }
+        target.value = ''; // Allow re-uploading the same file
+    };
+
+    const removeAttachment = (index: number, fieldName: 'emailBanner' | 'referenceModel' | 'mediaAttachments') => {
+        if (fieldName === 'mediaAttachments') {
+            const newAttachments = campaignInput.mediaAttachments.filter((_, i) => i !== index);
+            setCampaignInput({ ...campaignInput, mediaAttachments: newAttachments });
+        } else {
+            setCampaignInput({ ...campaignInput, [fieldName]: null });
+        }
+    };
+    
+    const handleSequenceChange = (index: number, field: keyof SequenceStep, value: string) => {
+        const newSequence = campaignInput.sequence.map((step, i) => {
+            if (i === index) {
+                return { ...step, [field]: value };
+            }
+            return step;
+        });
+        setCampaignInput({ ...campaignInput, sequence: newSequence });
+    };
+
+    const addSequenceStep = () => {
+        const newStep: SequenceStep = {
+            id: `step-${Date.now()}`,
+            communicationId: '', // Will be auto-generated by useEffect
+            channel: 'E-mail',
+            sendDate: new Date().toISOString().split('T')[0],
+            notes: '',
+            mediaAttachmentName: '',
+        };
+        setCampaignInput({ ...campaignInput, sequence: [...campaignInput.sequence, newStep] });
+    };
+
+    const removeSequenceStep = (index: number) => {
+        const newSequence = campaignInput.sequence.filter((_, i) => i !== index);
+        setCampaignInput({ ...campaignInput, sequence: newSequence });
+    };
+    
+    const handleSpreadsheetUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+        const file = e.target.files?.[0];
+        if (!file) return;
+
+        const reader = new FileReader();
+        reader.onload = (event) => {
+            const data = event.target?.result;
+            if (!data) return;
+
+            try {
+                const workbook = XLSX.read(data, { type: 'array' });
+                const sheetName = workbook.SheetNames[0];
+                const worksheet = workbook.Sheets[sheetName];
+                const json: any[] = XLSX.utils.sheet_to_json(worksheet);
+
+                if (json.length === 0) {
+                    alert("A planilha está vazia ou em um formato irreconhecível.");
+                    return;
+                }
+
+                const headers = Object.keys(json[0]);
+                const normalizeStr = (str: string) => str.toLowerCase().trim().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+                
+                const findHeader = (possibleNames: string[]) => {
+                    for (const name of possibleNames) {
+                        const normalizedName = normalizeStr(name);
+                        const header = headers.find(h => normalizeStr(h).includes(normalizedName));
+                        if (header) return header;
+                    }
+                    return null;
+                };
+
+                const channelHeader = findHeader(['canal']);
+                const dateHeader = findHeader(['data de envio', 'data']);
+                const notesHeader = findHeader(['observacao e diretrizes', 'observacoes', 'diretrizes', 'observacao']);
+
+                if (!channelHeader || !dateHeader || !notesHeader) {
+                    alert("A planilha deve conter as colunas: 'Canal', 'Data de Envio' e 'Observação e Diretrizes'.");
+                    return;
+                }
+
+                const newSequence: SequenceStep[] = json
+                    .map((row, index): SequenceStep | null => {
+                        const channel = row[channelHeader]?.toString().trim();
+                        const sendDateRaw = row[dateHeader];
+                        const notes = row[notesHeader]?.toString().trim() || '';
+
+                        if (!channel || !sendDateRaw) return null;
+                        
+                        let sendDate: string;
+                        try {
+                            let dateObj: Date;
+                            if (sendDateRaw instanceof Date) {
+                                dateObj = sendDateRaw;
+                            } else if (typeof sendDateRaw === 'number') {
+                                const excelDate = XLSX.SSF.parse_date_code(sendDateRaw);
+                                dateObj = new Date(Date.UTC(excelDate.y, excelDate.m - 1, excelDate.d, 12));
+                            } else if (typeof sendDateRaw === 'string') {
+                                const parts = sendDateRaw.split(/[/.-]/);
+                                if (parts.length < 2) throw new Error('Invalid string date format');
+                                
+                                const day = parseInt(parts[0], 10);
+                                const month = parseInt(parts[1], 10);
+                                const year = parts.length > 2 ? parseInt(parts[2], 10) : new Date().getFullYear();
+
+                                if (isNaN(day) || isNaN(month) || day > 31 || month > 12) throw new Error('Invalid date parts');
+                                
+                                dateObj = new Date(Date.UTC(year, month - 1, day, 12));
+                            } else {
+                                throw new Error('Unsupported date type');
+                            }
+
+                            if (isNaN(dateObj.getTime())) {
+                                throw new Error('Parsed date is invalid');
+                            }
+                            sendDate = dateObj.toISOString().split('T')[0];
+
+                        } catch (e) {
+                            console.warn(`Could not parse date on row ${index + 2}: ${sendDateRaw}. Skipping row.`);
+                            return null;
+                        }
+                        
+                        const validChannel = normalizeStr(channel).includes('mail') ? 'E-mail' : 'WhatsApp';
+
+                        return {
+                            id: `step-upload-${Date.now()}-${index}`,
+                            communicationId: '', // Will be set by useEffect
+                            channel: validChannel,
+                            sendDate,
+                            notes,
+                            mediaAttachmentName: '',
+                        };
+                    })
+                    .filter((step): step is SequenceStep => step !== null);
+
+                if (newSequence.length > 0) {
+                    setCampaignInput({ ...campaignInput, sequence: newSequence });
+                } else {
+                    alert("Nenhuma linha válida encontrada na planilha. Verifique as datas e se as colunas estão preenchidas.");
+                }
+            } catch (error) {
+                console.error("Error parsing spreadsheet:", error);
+                alert("Ocorreu um erro ao ler o arquivo. Verifique se é uma planilha válida (.xlsx, .xls, .csv).");
+            } finally {
+                 e.target.value = ''; // Allow re-uploading the same file
+            }
+        };
+        reader.readAsArrayBuffer(file);
+    };
+
+
+    const availableMedia = campaignInput.mediaAttachments.map(f => f.name);
+    const isSectionOneIncomplete = !campaignInput.campaignId.trim() || !campaignInput.objective.trim() || !campaignInput.targetAudience.trim() || !campaignInput.cta.trim();
+
+    return (
+        <Card>
+            <div className="space-y-8">
+                <div>
+                    <h2 className="text-2xl font-bold text-slate-100">Plano de Comunicação</h2>
+                    <p className="mt-1 text-sm text-slate-400">Preencha os detalhes da campanha para gerar as comunicações.</p>
+                </div>
+
+                <div className="space-y-6 border-t border-slate-700 pt-6">
+                    <h3 className="text-lg font-semibold text-slate-200">1. Detalhes da Campanha</h3>
+                    <Input label="ID da Campanha" name="campaignId" value={campaignInput.campaignId} onChange={handleChange} placeholder="Ex: PS-2026-CONV-MINDSIGHT" />
+                    <Textarea label="Objetivo Principal" name="objective" value={campaignInput.objective} onChange={handleChange} rows={3} placeholder="Ex: Garantir que 90% dos candidatos avancem para a próxima fase..." />
+                    <Select label="Estilo/Tom Geral" name="tone" value={campaignInput.tone} onChange={handleChange} options={TONES} />
+                    <Textarea label="Público-Alvo" name="targetAudience" value={campaignInput.targetAudience} onChange={handleChange} rows={2} placeholder="Ex: Candidatos que ainda não completaram a etapa da Mindsight" />
+                    <Textarea label="Chamada para Ação (CTA) Principal" name="cta" value={campaignInput.cta} onChange={handleChange} rows={2} placeholder="Ex: Clique aqui para acessar a plataforma e concluir sua etapa!" />
+                </div>
+                
+                <div className="space-y-6 border-t border-slate-700 pt-6">
+                    <h3 className="text-lg font-semibold text-slate-200">2. Recursos e Regras Globais</h3>
+                    
+                    <div>
+                        <label className="block text-sm font-medium text-slate-300 mb-1">Faixa de E-mail (Banner)</label>
+                        {campaignInput.emailBanner && (
+                            <div className="flex items-center justify-between bg-slate-700 px-3 py-1.5 rounded-md text-sm mb-2">
+                                <span className="text-slate-200 truncate">{campaignInput.emailBanner.name}</span>
+                                <button onClick={() => removeAttachment(0, 'emailBanner')} className="text-red-400 hover:text-red-300 ml-2 font-bold text-lg">&times;</button>
+                            </div>
+                        )}
+                        <input type="file" onChange={(e) => handleFileChange(e, 'emailBanner')} accept="image/*" className="block w-full text-sm text-slate-400 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-sky-600/20 file:text-sky-300 hover:file:bg-sky-600/30 transition" />
+                    </div>
+
+                    <div>
+                        <label className="block text-sm font-medium text-slate-300 mb-1">Outras Mídias (Imagens/Gifs)</label>
+                        {campaignInput.mediaAttachments.map((file, index) => (
+                            <div key={index} className="flex items-center justify-between bg-slate-700 px-3 py-1.5 rounded-md text-sm mb-2">
+                                <span className="text-slate-200 truncate">{file.name}</span>
+                                <button onClick={() => removeAttachment(index, 'mediaAttachments')} className="text-red-400 hover:text-red-300 ml-2 font-bold text-lg">&times;</button>
+                            </div>
+                        ))}
+                        <input type="file" multiple onChange={(e) => handleFileChange(e, 'mediaAttachments')} accept="image/*" className="block w-full text-sm text-slate-400 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-sky-600/20 file:text-sky-300 hover:file:bg-sky-600/30 transition" />
+                    </div>
+                    
+                    <div>
+                        <label className="block text-sm font-medium text-slate-300 mb-1">Modelo de Comunicação (Referência)</label>
+                         {campaignInput.referenceModel && (
+                             <div className="flex items-center justify-between bg-slate-700 px-3 py-1.5 rounded-md text-sm mb-2">
+                                <span className="text-slate-200 truncate">{campaignInput.referenceModel.name}</span>
+                                <button onClick={() => removeAttachment(0, 'referenceModel')} className="text-red-400 hover:text-red-300 ml-2 font-bold text-lg">&times;</button>
+                            </div>
+                        )}
+                        <input type="file" onChange={(e) => handleFileChange(e, 'referenceModel')} accept=".txt,.pdf,.doc,.docx" className="block w-full text-sm text-slate-400 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-sky-600/20 file:text-sky-300 hover:file:bg-sky-600/30 transition" />
+                    </div>
+
+                    <Textarea label="Links Obrigatórios" name="mandatoryLinks" value={campaignInput.mandatoryLinks} onChange={handleChange} rows={3} placeholder="Ex: Link da plataforma: [URL], Link do regulamento: [URL]" />
+                    <Textarea label="Rodapé Fixo" name="fixedFooter" value={campaignInput.fixedFooter} onChange={handleChange} rows={3} placeholder="Ex: Lembrete: O prazo final é [DATA]! Em caso de dúvidas, visite a FAQ." />
+                </div>
+                
+                <div className="space-y-6 border-t border-slate-700 pt-6">
+                    <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between">
+                         <h3 className="text-lg font-semibold text-slate-200 mb-2 sm:mb-0">3. Sequência de Comunicação</h3>
+                         <label htmlFor="spreadsheet-upload" className="cursor-pointer text-sm bg-slate-700 hover:bg-slate-600 text-slate-200 font-semibold py-2 px-4 rounded-md transition text-center">
+                            Carregar de Planilha (.xlsx, .csv)
+                         </label>
+                         <input id="spreadsheet-upload" type="file" className="hidden" onChange={handleSpreadsheetUpload} accept=".xlsx, .xls, .csv" />
+                    </div>
+
+                    {campaignInput.sequence.map((step, index) => (
+                        <div key={step.id} className="bg-slate-900/50 p-4 rounded-lg border border-slate-700 space-y-4">
+                            <div className="flex items-center justify-between">
+                                <span className="font-bold text-slate-400">Etapa {index + 1}</span>
+                                <button onClick={() => removeSequenceStep(index)} className="text-red-400 hover:text-red-300 font-bold text-xl leading-none">&times;</button>
+                            </div>
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <Input label="ID da Comunicação" name="communicationId" value={step.communicationId} onChange={() => {}} readOnly className="bg-slate-800 text-slate-400 cursor-default" />
+                                <Select label="Canal" name="channel" value={step.channel} onChange={(e) => handleSequenceChange(index, 'channel', e.target.value as 'E-mail' | 'WhatsApp')} options={CHANNELS} />
+                            </div>
+                            <Input label="Data de Envio" name="sendDate" type="date" value={step.sendDate} onChange={(e) => handleSequenceChange(index, 'sendDate', e.target.value)} />
+                            <Textarea label="Observações/Diretrizes" name="notes" value={step.notes} onChange={(e) => handleSequenceChange(index, 'notes', e.target.value)} rows={2} />
+                            <Select label="Mídia Anexada a Usar" name="mediaAttachmentName" value={step.mediaAttachmentName} onChange={(e) => handleSequenceChange(index, 'mediaAttachmentName', e.target.value)} options={['', ...availableMedia]} optionLabels={['Nenhuma', ...availableMedia]} />
+                        </div>
+                    ))}
+                    <Button onClick={addSequenceStep} className="w-full bg-slate-700 hover:bg-slate-600">Adicionar Etapa</Button>
+                </div>
+                
+                <div className="pt-6 border-t border-slate-700">
+                    <Button onClick={onGenerate} disabled={isLoading || isSectionOneIncomplete} className="w-full text-base py-3">
+                        {isLoading ? 'Gerando...' : 'Gerar Plano de Comunicação'}
+                    </Button>
+                    {isSectionOneIncomplete && (
+                        <p className="text-xs text-amber-400 text-center mt-2">
+                            Por favor, preencha todos os campos da Seção 1 (Detalhes da Campanha) para gerar o plano.
+                        </p>
+                    )}
+                </div>
+            </div>
+        </Card>
+    );
+};

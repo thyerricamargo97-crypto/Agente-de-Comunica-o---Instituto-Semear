@@ -1,0 +1,5 @@
+{
+  "name": "Semear Communications Agent",
+  "description": "An AI-powered agent to generate engaging and precise communication texts (emails or WhatsApp messages) for Instituto Semear, an NGO supporting low-income university students.",
+  "requestFramePermissions": []
+}
